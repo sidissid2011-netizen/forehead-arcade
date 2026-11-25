@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Forehead Arcade</title>
-<script src="peerjs.min.js"></script>
+<script src="mqtt.min.js"></script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Anton&family=Archivo:wght@500;700;900&display=swap" rel="stylesheet">
 <style>
@@ -69,7 +69,7 @@ const KINDS={chess:'Chess',ttt:'Tic-tac-toe',c4:'Connect 4',darts:'Darts'};
 const $=id=>document.getElementById(id);
 const esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 let kind='chess',local=null,sel=-1,aim=null,busy=false;
-const net={peer:null,conn:null,host:false,code:'',g:null,them:'',state:'idle'};
+let cur=null;const games={},lobbyMap={};
 let myName='';try{myName=localStorage.getItem('fa-name')||''}catch(e){}
 
 /* ---------- game rules ---------- */
@@ -145,9 +145,9 @@ function play(g,mv){
 }
 
 /* ---------- who am I in this game ---------- */
-const game=()=>local||net.g||null;
-function mySeat(g){if(!g)return 0;if(g.local)return g.turn;return net.host?g.hostSeat:3-g.hostSeat}
-const seatName=p=>p===mySeat(net.g)?'You':(net.them||'Friend');
+const game=()=>local||(cur&&games[cur])||null;
+function mySeat(g){if(!g)return 0;if(g.local)return g.turn;return g.p1===myId?1:g.p2===myId?2:0}
+const seatName=p=>{const g=game();if(!g)return'';if(p===mySeat(g))return'You';return(p===1?g.n1:g.n2)||'Friend'};
 function canMove(g){return g&&g.status==='playing'&&mySeat(g)===g.turn&&!busy}
 
 /* ---------- drawing ---------- */
@@ -198,7 +198,7 @@ function status(){
   const seat=mySeat(g);
   const label=p=>g.local?(g.kind==='chess'?(p===1?'White':'Black'):g.kind==='c4'?(p===1?'Red':'Yellow'):g.kind==='ttt'?(p===1?'X':'O'):'Player '+p):seatName(p);
   if(g.kind==='darts'){const[a,b]=dartTotals(g.s.t);vs.textContent=`${label(1)}: ${a}  ·  ${label(2)}: ${b}  ·  round ${Math.min(3,Math.floor(g.s.t.length/6)+1)} of 3`}
-  else vs.textContent=g.local?'Pass the phone back and forth':`You vs ${net.them||'Friend'}`+(net.state==='lost'?' · connection lost':'');
+  else vs.textContent=g.local?'Pass the phone back and forth':`${seatName(1)} vs ${g.p2?seatName(2):'(waiting…)'}`;
   if(g.status==='waiting'){st.textContent='Waiting for someone to join…';return}
   if(g.status==='done'){st.textContent=g.winner==='draw'?"It's a draw":(g.local?label(g.winner)+' wins!':(g.winner===seat?'You win!':label(g.winner)+' wins'));return}
   let x='';
@@ -233,95 +233,123 @@ function spin(){
 async function commit(g,mv){
   const u=play(g,mv);if(!u)return;
   if(g.local){Object.assign(local,u);draw();return}
-  net.g={...g,...u};send({t:'state',g:net.g});draw();
+  pushGame({...g,...u});
 }
 
 
-/* ---------- online (peer to peer) ---------- */
+/* ---------- online: lobby + saved games on public MQTT brokers (no accounts) ---------- */
+const NS='fhArcade7';
 const CAP={chess:'Forehead chess',ttt:'Forehead tic-tac-toe',c4:'Forehead Connect 4',darts:'Forehead darts'};
-const fresh=(k,hostSeat)=>({kind:k,s:init[k](),turn:1,status:'playing',winner:0,hostSeat});
-function send(m){try{if(net.conn&&net.conn.open)net.conn.send(m)}catch(e){}}
-const linkFor=c=>location.href.split('#')[0]+'#'+c;
-function wire(c){
-  net.conn=c;
-  c.on('open',()=>{net.state='on';send({t:'hi',name:myName});if(net.host){net.g=fresh(kind,1);send({t:'state',g:net.g})}render()});
-  c.on('data',m=>{
-    if(!m||typeof m!=='object')return;
-    if(m.t==='hi'){net.them=String(m.name||'').slice(0,20)}
-    if(m.t==='state'&&m.g&&init[m.g.kind]){net.g=m.g;kind=m.g.kind;sel=-1;if(aim&&!canMove(net.g))aim=null}
-    render();
-  });
-  c.on('close',()=>{net.state='lost';render()});
+const BROKERS=['wss://broker.hivemq.com:8884/mqtt','wss://broker.emqx.io:8084/mqtt'];
+let myId='';try{myId=localStorage.getItem('fa-id')||''}catch(e){}
+if(!/^u[a-z0-9]{6,12}$/.test(myId)){myId='u'+Math.random().toString(36).slice(2,10);try{localStorage.setItem('fa-id',myId)}catch(e){}}
+let clients=[],hashGid=(location.hash.slice(1).match(/^g[a-z0-9]{5,12}$/)||[])[0]||null;
+try{if(!hashGid){const c=localStorage.getItem('fa-cur');if(c)cur=c}}catch(e){}
+const fresh=k=>({s:init[k](),turn:1,status:'playing',winner:0});
+const clean=s=>String(s||'').slice(0,20);
+const isOnline=()=>clients.some(c=>c.connected);
+
+function publish(topic,obj){
+  const body=obj===null?'':JSON.stringify(obj);
+  for(const c of clients)if(c.connected)c.publish(topic,body,{qos:1,retain:true});
 }
-function makePeer(id){
-  if(!window.Peer){net.state='err';$('net').textContent="Online play couldn't load. Check your connection and reload.";return null}
-  const p=id?new Peer(id):new Peer();
-  p.on('error',e=>{net.state='err';$('net').textContent=e&&e.type==='peer-unavailable'?'That game link has expired. Ask your friend for a new one.':'Connection problem. Reload and try again.';render()});
-  return p;
-}
-function host(){
-  net.host=true;net.code='fh'+Math.random().toString(36).slice(2,9);net.state='wait';local=null;
-  net.peer=makePeer(net.code);if(!net.peer)return;
-  net.peer.on('open',()=>render());
-  net.peer.on('connection',c=>{if(net.conn&&net.conn.open){c.close();return}wire(c)});
+function pushGame(g){
+  g={...g,v:(g.v||0)+1,upd:Date.now()};games[g.id]=g;
+  publish(NS+'/game/'+g.id,g);
+  publish(NS+'/lobby/'+g.id,{id:g.id,kind:g.kind,n1:g.n1,status:g.status==='waiting'?'open':g.status,upd:g.upd});
   render();
 }
-function join(code){
-  net.host=false;net.code=code;net.state='joining';
-  net.peer=makePeer();if(!net.peer)return;
-  net.peer.on('open',()=>wire(net.peer.connect(code,{reliable:true})));
+let rq=0;const soon=()=>{if(!rq)rq=requestAnimationFrame(()=>{rq=0;render()})};
+function onMsg(topic,raw){
+  const [, type,gid]=topic.split('/');if(!/^g[a-z0-9]{5,12}$/.test(gid||''))return;
+  if(!raw){if(type==='lobby')delete lobbyMap[gid];else delete games[gid];soon();return}
+  let d;try{d=JSON.parse(raw)}catch(e){return}
+  if(!d||typeof d!=='object'||!KINDS[d.kind])return;
+  if(type==='lobby'){if(!lobbyMap[gid]||(d.upd||0)>=(lobbyMap[gid].upd||0))lobbyMap[gid]={id:gid,kind:d.kind,n1:clean(d.n1),status:String(d.status),upd:+d.upd||0}}
+  if(type==='game'){const old=games[gid];if(!old||(d.v||0)>(old.v||0)){d.id=gid;d.n1=clean(d.n1);d.n2=clean(d.n2);games[gid]=d;
+    if(gid===cur){sel=-1;if(aim&&!canMove(d))aim=null}}}
+  if(hashGid&&games[hashGid]){const g=games[hashGid];hashGid=null;openGame(g.id,true)}
+  soon();
+}
+function connect(){
+  if(!window.mqtt){$('net').textContent="Online play couldn't load. Check your internet and reload.";return}
+  clients=BROKERS.map(url=>{
+    let c;try{c=mqtt.connect(url,{clientId:'fa_'+myId+'_'+Math.random().toString(36).slice(2,6),clean:true,reconnectPeriod:2500,connectTimeout:9000,keepalive:30})}catch(e){return null}
+    c.on('connect',()=>{c.subscribe([NS+'/lobby/+',NS+'/game/+'],{qos:1});soon()});
+    c.on('close',soon);c.on('error',()=>{});
+    c.on('message',(t,b)=>onMsg(t,b.toString()));
+    return c}).filter(Boolean);
+}
+document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='visible')for(const c of clients)if(!c.connected)try{c.reconnect()}catch(e){}});
+setInterval(soon,5000);
+
+function setCur(id){cur=id;try{id?localStorage.setItem('fa-cur',id):localStorage.removeItem('fa-cur')}catch(e){}}
+function openGame(id,tryJoin){
+  const g=games[id];if(!g)return;local=null;sel=-1;aim=null;setCur(id);kind=g.kind;
+  if(tryJoin&&g.status==='waiting'&&g.p1!==myId&&!g.p2)pushGame({...g,p2:myId,n2:myName||'Player 2',status:'playing'});
   render();
 }
-function leave(){try{net.peer&&net.peer.destroy()}catch(e){}Object.assign(net,{peer:null,conn:null,host:false,code:'',g:null,them:'',state:'idle'});history.replaceState(null,'',location.pathname+location.search);render()}
+function create(){
+  if(!isOnline()){$('net').textContent='Still connecting… try again in a second.';return}
+  const id='g'+Math.random().toString(36).slice(2,10);
+  setCur(id);local=null;
+  pushGame({id,kind,...fresh(kind),status:'waiting',p1:myId,p2:null,n1:myName||'Player 1',n2:'',v:0});
+}
 
 /* ---------- ui ---------- */
 function tabs(){
-  const k=game()?game().kind:kind;
-  $('tabs').innerHTML=Object.entries(KINDS).map(([x,v])=>`<button data-k="${x}" class="${x===k?'on':''}">${v}</button>`).join('');
+  const k=game()?game().kind:kind,lock=!!(cur&&games[cur]);
+  $('tabs').innerHTML=Object.entries(KINDS).map(([x,v])=>`<button data-k="${x}" class="${x===k?'on':''}" ${lock&&x!==k?'disabled':''}>${v}</button>`).join('');
 }
-$('tabs').addEventListener('click',e=>{const b=e.target.closest('button');if(!b)return;kind=b.dataset.k;sel=-1;aim=null;
-  if(net.state==='on'){net.g=fresh(kind,net.g?3-net.g.hostSeat:1);send({t:'state',g:net.g})}
-  else if(local)local=null;
-  render()});
+$('tabs').addEventListener('click',e=>{const b=e.target.closest('button');if(!b||b.disabled)return;kind=b.dataset.k;sel=-1;aim=null;if(local)local={local:true,...fresh(kind)};render()});
 function actions(){
   const g=game(),a=[];
   if(local){a.push(['back','Back']);if(g.status==='done')a.push(['again','Rematch','go'])}
-  else if(net.state==='idle'||net.state==='err'){a.push(['host','Play a friend online','go']);a.push(['local','Play on this phone'])}
-  else{if(g&&g.status==='done'&&net.state==='on')a.push(['again','Rematch','go']);a.push(['leave','Leave game'])}
+  else if(g){
+    if(g.status==='done'&&mySeat(g))a.push(['again','Rematch','go']);
+    if(g.status==='waiting'&&g.p1===myId)a.push(['copy','Copy invite link','go']);
+    a.push(['back','Back to lobby']);
+    if(g.p1===myId||g.p2===myId)a.push(['end','End game']);
+  }else{a.push(['new','Create game','go']);a.push(['local','Play on this phone'])}
   $('actions').innerHTML=a.map(([k,t,c])=>`<button data-a="${k}" class="${c||''}">${t}</button>`).join('');
 }
-$('actions').addEventListener('click',e=>{
+$('actions').addEventListener('click',async e=>{
   const b=e.target.closest('button');if(!b)return;const a=b.dataset.a,g=game();
-  if(a==='back'){local=null;sel=-1;aim=null;render()}
-  if(a==='local'){local={local:true,...fresh(kind,1)};render()}
-  if(a==='host')host();
-  if(a==='leave')leave();
-  if(a==='again'){if(g.local){Object.assign(local,fresh(g.kind,1),{local:true})}else{net.g=fresh(g.kind,3-g.hostSeat);send({t:'state',g:net.g})}sel=-1;render()}
+  if(a==='back'){local=null;setCur(null);sel=-1;aim=null;history.replaceState(null,'',location.pathname);render()}
+  if(a==='local'){local={local:true,kind,...fresh(kind)};render()}
+  if(a==='new')create();
+  if(a==='copy'){const url=location.href.split('#')[0]+'#'+g.id;
+    try{if(navigator.share){await navigator.share({title:'Forehead Arcade',url});return}}catch(x){return}
+    try{await navigator.clipboard.writeText(url);b.textContent='Copied!'}catch(x){b.textContent=url}}
+  if(a==='end'){publish(NS+'/game/'+g.id,null);publish(NS+'/lobby/'+g.id,null);delete games[g.id];delete lobbyMap[g.id];setCur(null);render()}
+  if(a==='again'){
+    if(g.local){Object.assign(local,fresh(g.kind));render();return}
+    pushGame({...g,...fresh(g.kind),p1:g.p2,p2:g.p1,n1:g.n2,n2:g.n1});sel=-1}
 });
 function lobby(){
-  const L=$('lobby');let h='';
-  if(net.state==='idle'||net.state==='err'){
-    h=`<p class="empty">Tap <b>Play a friend online</b>, send them the link, and the game starts the moment they open it. No account or app needed.</p>
-    <div class="field"><input id="nick" maxlength="20" placeholder="Your name (optional)" value="${esc(myName)}"></div>`;
-  }else if(net.state==='wait'){
-    const ready=net.peer&&net.peer.open;
-    h=`<p class="empty">${ready?'Send this link to a friend. Waiting for them to open it…':'Setting up your game…'}</p>`+
-      (ready?`<div class="link" id="lk"></div><div class="field"><button id="cp" class="go">Copy link</button><button id="sh">Share…</button></div>`:'');
-  }else if(net.state==='joining'){h='<p class="empty">Connecting to your friend…</p>'}
-  else if(net.state==='on'){h=`<p class="empty">Connected to ${esc(net.them||'your friend')}. Switch games with the buttons above; it changes for both of you.</p>`}
-  else if(net.state==='lost'){h='<p class="empty">Your friend disconnected. Leave and start a new game to play again.</p>'}
+  const L=$('lobby'),now=Date.now(),on=isOnline();
+  if(cur&&games[cur]){const g=games[cur];
+    L.innerHTML=`<p class="empty">${g.status==='waiting'?'Your game is in the lobby. Anyone who opens this site can tap Join, or send them the invite link. You can leave the app; the game stays open.':'Game saved online. Leave the app anytime and come back, it picks up where you left off.'}</p>`;
+    $('net').textContent=on?'':'Reconnecting…';return}
+  const open=Object.values(lobbyMap).filter(x=>x.status==='open'&&now-x.upd<6*3600e3&&!(games[x.id]&&games[x.id].p1===myId)).sort((a,b)=>b.upd-a.upd).slice(0,15);
+  const mine=Object.values(games).filter(g=>(g.p1===myId||g.p2===myId)&&now-g.upd<3*864e5).sort((a,b)=>b.upd-a.upd).slice(0,10);
+  const row=(id,txt,btn,go)=>`<div class="item"><span>${esc(txt)}</span><button data-g="${esc(id)}" data-j="${go?1:0}" class="${go?'go':''}">${btn}</button></div>`;
+  let h=`<div class="field"><input id="nick" maxlength="20" placeholder="Your name" value="${esc(myName)}"></div>`;
+  h+=open.map(x=>row(x.id,`${KINDS[x.kind]} · ${x.n1||'Someone'} is waiting`,'Join',1)).join('');
+  h+=mine.map(g=>row(g.id,`${KINDS[g.kind]} vs ${(g.p1===myId?g.n2:g.n1)||'(waiting)'} · ${g.status==='waiting'?'waiting':g.status==='done'?'finished':mySeat(g)===g.turn?'your turn!':'their turn'}`,'Open',0)).join('');
+  if(!open.length&&!mine.length)h+=`<p class="empty">${on?'No open games right now. Pick a game above and tap Create game.':'Connecting to the lobby…'}</p>`;
   L.innerHTML=h;
-  const lk=$('lk');if(lk)lk.textContent=linkFor(net.code);
+  $('net').textContent=on?'':'Connecting…';
 }
-$('lobby').addEventListener('input',e=>{if(e.target.id==='nick'){myName=e.target.value.slice(0,20);try{localStorage.setItem('fa-name',myName)}catch(x){}}});
-$('lobby').addEventListener('click',async e=>{
-  const url=linkFor(net.code);
-  if(e.target.id==='cp'){try{await navigator.clipboard.writeText(url);e.target.textContent='Copied!'}catch(x){e.target.textContent='Copy it from above'}}
-  if(e.target.id==='sh'){try{await navigator.share({title:'Forehead Arcade',text:'Play me on the forehead',url})}catch(x){}}
-});
-function render(){$('cap').textContent=CAP[game()?game().kind:kind];tabs();actions();lobby();draw()}
-render();
-{const c=location.hash.slice(1);if(/^fh[a-z0-9]{4,12}$/.test(c))join(c)}
+$('lobby').addEventListener('input',e=>{if(e.target.id==='nick'){myName=clean(e.target.value);try{localStorage.setItem('fa-name',myName)}catch(x){}}});
+$('lobby').addEventListener('click',e=>{const b=e.target.closest('button[data-g]');if(!b)return;openGame(b.dataset.g,b.dataset.j==='1')});
+function render(){
+  if(cur&&!games[cur]&&isOnline()&&!hashGid){/* game ended or not loaded yet */}
+  $('cap').textContent=CAP[game()?game().kind:kind];
+  const ae=document.activeElement,typing=ae&&ae.id==='nick';
+  tabs();actions();if(!typing)lobby();draw();
+}
+render();connect();
 }
 </script>
 </body>
