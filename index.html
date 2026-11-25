@@ -36,6 +36,8 @@ button:disabled{opacity:.4;box-shadow:none}
 .vs{color:var(--mute);font-size:15px;margin:2px 0 10px}
 .row{display:flex;flex-wrap:wrap;gap:10px;margin:10px 0}
 .card{margin-top:26px;border-top:3px solid var(--ink);padding-top:10px}
+#dot{font:700 13px Archivo,sans-serif;text-transform:none;vertical-align:middle;margin-left:6px}
+.card.top{margin:4px 0 16px;border:3px solid var(--ink);background:#fff;padding:10px 12px}
 .card h2{font:400 24px Anton,Impact,sans-serif;text-transform:uppercase;margin:0 0 6px}
 .list{display:grid}
 .item{display:flex;align-items:center;gap:10px;justify-content:space-between;padding:10px 0;border-bottom:1.5px dashed #0004}
@@ -57,8 +59,8 @@ input{font:600 16px Archivo,sans-serif;min-height:44px;padding:0 10px;border:2.5
   <div class="status" id="status">Loading…</div>
   <p class="vs" id="vs"></p>
   <div class="row" id="actions"></div>
-  <div class="card">
-    <h2>Play online</h2>
+  <div class="card" id="card">
+    <h2>Open games <small id="dot"></small></h2>
     <div class="list" id="lobby"></div>
     <p class="note" id="net"></p>
   </div>
@@ -328,6 +330,7 @@ $('actions').addEventListener('click',async e=>{
 });
 function lobby(){
   const L=$('lobby'),now=Date.now(),on=isOnline();
+  $('card').querySelector('h2').firstChild.textContent=game()?'Online ':'Open games ';
   if(cur&&games[cur]){const g=games[cur];
     L.innerHTML=`<p class="empty">${g.status==='waiting'?'Your game is in the lobby. Anyone who opens this site can tap Join, or send them the invite link. You can leave the app; the game stays open.':'Game saved online. Leave the app anytime and come back, it picks up where you left off.'}</p>`;
     $('net').textContent=on?'':'Reconnecting…';return}
@@ -347,6 +350,10 @@ function render(){
   if(cur&&!games[cur]&&isOnline()&&!hashGid){/* game ended or not loaded yet */}
   $('cap').textContent=CAP[game()?game().kind:kind];
   const ae=document.activeElement,typing=ae&&ae.id==='nick';
+  const card=$('card'),stage=document.querySelector('.stage'),inGame=!!game();
+  if(!inGame&&card.nextElementSibling!==stage){stage.parentNode.insertBefore(card,stage);card.classList.add('top')}
+  if(inGame&&card.classList.contains('top')){$('actions').after(card);card.classList.remove('top')}
+  const n=clients.filter(c=>c.connected).length;$('dot').textContent=n?'● online':'○ connecting…';$('dot').style.color=n?'#0a8f3c':'#b00020';
   tabs();actions();if(!typing)lobby();draw();
 }
 render();connect();
