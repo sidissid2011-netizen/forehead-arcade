@@ -1,0 +1,328 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Forehead Arcade</title>
+<script src="peerjs.min.js"></script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Anton&family=Archivo:wght@500;700;900&display=swap" rel="stylesheet">
+<style>
+/* VOICE: a Discord meme that got out of hand
+   IDEA: the classic Impact-caption meme, but the image is playable
+   PICTURE: the photo with a top caption and the live game on the forehead
+   COLOUR and TYPE: paper white, black ink, one highlighter yellow; Anton + Archivo
+   LAYOUT: caption-y header, game picker, stage, status, lobby as a plain list */
+:root{color-scheme:light;--bg:#f4f3ef;--ink:#111;--mute:#5d5d5d;--hi:#ffe23d;--blue:#2f5bff}
+*{box-sizing:border-box;min-width:0}
+body{margin:0;background:var(--bg);color:var(--ink);font:500 16px/1.45 Archivo,system-ui,sans-serif;overflow-x:clip}
+.wrap{max-width:540px;margin:0 auto;padding:14px 14px 48px}
+h1{font:400 clamp(40px,12vw,60px)/.95 Anton,Impact,sans-serif;margin:6px 0 4px;text-transform:uppercase;letter-spacing:.5px}
+h1 mark{background:var(--hi);padding:0 6px;color:inherit}
+.sub{margin:0 0 14px;font-size:15px;color:var(--mute)}
+.tabs{display:flex;gap:8px;overflow-x:auto;padding:2px 4px 8px 0;margin-bottom:6px}
+.tabs button{flex:none}
+button{font:700 15px Archivo,sans-serif;min-height:44px;padding:0 14px;border-radius:0;border:2.5px solid var(--ink);background:#fff;color:var(--ink);cursor:pointer;box-shadow:3px 3px 0 var(--ink)}
+button:active{transform:translate(2px,2px);box-shadow:1px 1px 0 var(--ink)}
+button.on{background:var(--ink);color:#fff}
+button.go{background:var(--hi)}
+button:focus-visible{outline:3px solid var(--blue);outline-offset:3px}
+button:disabled{opacity:.4;box-shadow:none}
+.stage{position:relative;aspect-ratio:700/1100;overflow:hidden;border:3px solid var(--ink);background:#000 url(face.jpg) center/cover;margin-top:4px}
+.cap{position:absolute;left:0;right:0;top:3%;text-align:center;font:400 clamp(26px,8.5vw,44px)/1 Anton,Impact,sans-serif;text-transform:uppercase;color:#fff;-webkit-text-stroke:2px #000;paint-order:stroke fill;text-shadow:0 0 6px #000;pointer-events:none;padding:0 4%}
+.fh{position:absolute;left:43.57%;top:21.82%;width:51.43%;height:32.73%;transform:rotate(-3deg)}
+.fh svg{width:100%;height:100%;display:block;overflow:visible;touch-action:manipulation}
+.status{margin:14px 0 2px;font:400 30px/1.05 Anton,Impact,sans-serif;text-transform:uppercase;min-height:32px;text-wrap:balance}
+.vs{color:var(--mute);font-size:15px;margin:2px 0 10px}
+.row{display:flex;flex-wrap:wrap;gap:10px;margin:10px 0}
+.card{margin-top:26px;border-top:3px solid var(--ink);padding-top:10px}
+.card h2{font:400 24px Anton,Impact,sans-serif;text-transform:uppercase;margin:0 0 6px}
+.list{display:grid}
+.item{display:flex;align-items:center;gap:10px;justify-content:space-between;padding:10px 0;border-bottom:1.5px dashed #0004}
+.item span{font-size:15px}
+.note{color:#b00020;font-size:14px;margin:8px 0 0}
+.empty{color:var(--mute);font-size:15px;margin:4px 0}
+@media(prefers-reduced-motion:no-preference){.pop{animation:pop .2s ease-out}@keyframes pop{from{transform:scale(.5);opacity:0}}}
+.field{display:flex;gap:8px;flex-wrap:wrap;margin:8px 0}
+input{font:600 16px Archivo,sans-serif;min-height:44px;padding:0 10px;border:2.5px solid var(--ink);border-radius:0;background:#fff;flex:1 1 180px}
+.link{font:600 14px ui-monospace,monospace;word-break:break-all;background:#fff;border:2px dashed var(--ink);padding:8px;margin:8px 0}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Forehead <mark>Arcade</mark></h1>
+  <p class="sub">Four games. One forehead. Pick your weapon.</p>
+  <div class="tabs" id="tabs"></div>
+  <div class="stage"><div class="cap" id="cap"></div><div class="fh"><svg id="sv" viewBox="0 0 100 100"></svg></div></div>
+  <div class="status" id="status">Loading…</div>
+  <p class="vs" id="vs"></p>
+  <div class="row" id="actions"></div>
+  <div class="card">
+    <h2>Play online</h2>
+    <div class="list" id="lobby"></div>
+    <p class="note" id="net"></p>
+  </div>
+</div>
+<script>
+{
+const KINDS={chess:'Chess',ttt:'Tic-tac-toe',c4:'Connect 4',darts:'Darts'};
+const $=id=>document.getElementById(id);
+const esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+let kind='chess',local=null,sel=-1,aim=null,busy=false;
+const net={peer:null,conn:null,host:false,code:'',g:null,them:'',state:'idle'};
+let myName='';try{myName=localStorage.getItem('fa-name')||''}catch(e){}
+
+/* ---------- game rules ---------- */
+const init={
+  chess:()=>({b:'rnbqkbnrpppppppp'+'.'.repeat(32)+'PPPPPPPPRNBQKBNR',ca:'KQkq',ep:-1,last:[]}),
+  ttt:()=>({b:'.........'}),
+  c4:()=>({b:'.'.repeat(42)}),
+  darts:()=>({t:[]})
+};
+const isW=p=>p>='A'&&p<='Z';
+function attacked(b,sq,byW){
+  const r=sq>>3,c=sq&7,at=(rr,cc)=>rr>=0&&rr<8&&cc>=0&&cc<8?b[rr*8+cc]:'';
+  const P=byW?'P':'p',N=byW?'N':'n',K=byW?'K':'k',B=byW?'B':'b',R=byW?'R':'r',Q=byW?'Q':'q';
+  const pr=byW?r+1:r-1; if(at(pr,c-1)===P||at(pr,c+1)===P)return true;
+  for(const[a,d]of[[1,2],[2,1],[-1,2],[-2,1],[1,-2],[2,-1],[-1,-2],[-2,-1]])if(at(r+a,c+d)===N)return true;
+  for(let a=-1;a<=1;a++)for(let d=-1;d<=1;d++)if((a||d)&&at(r+a,c+d)===K)return true;
+  const ray=(dirs,set)=>dirs.some(([a,d])=>{let rr=r+a,cc=c+d;while(rr>=0&&rr<8&&cc>=0&&cc<8){const p=b[rr*8+cc];if(p!=='.')return set.includes(p);rr+=a;cc+=d}return false});
+  return ray([[1,1],[1,-1],[-1,1],[-1,-1]],[B,Q])||ray([[1,0],[-1,0],[0,1],[0,-1]],[R,Q]);
+}
+function pseudo(s,w){
+  const b=s.b,m=[];
+  for(let i=0;i<64;i++){
+    const p=b[i];if(p==='.'||isW(p)!==w)continue;
+    const r=i>>3,c=i&7,t=p.toUpperCase();
+    const free=(rr,cc)=>rr>=0&&rr<8&&cc>=0&&cc<8;
+    const tryAdd=(rr,cc)=>{if(!free(rr,cc))return false;const j=rr*8+cc,q=b[j];if(q==='.'){m.push([i,j]);return true}if(isW(q)!==w)m.push([i,j]);return false};
+    if(t==='P'){const d=w?-1:1,r1=r+d;
+      if(free(r1,c)&&b[r1*8+c]==='.'){m.push([i,r1*8+c]);if(r===(w?6:1)&&b[(r+2*d)*8+c]==='.')m.push([i,(r+2*d)*8+c])}
+      for(const dc of[-1,1])if(free(r1,c+dc)){const j=r1*8+c+dc,q=b[j];if((q!=='.'&&isW(q)!==w)||j===s.ep)m.push([i,j])}}
+    else if(t==='N')for(const[a,d]of[[1,2],[2,1],[-1,2],[-2,1],[1,-2],[2,-1],[-1,-2],[-2,-1]])tryAdd(r+a,c+d);
+    else if(t==='K')for(let a=-1;a<=1;a++)for(let d=-1;d<=1;d++){if(a||d)tryAdd(r+a,c+d)}
+    else{const dirs=[];if(t!=='R')dirs.push([1,1],[1,-1],[-1,1],[-1,-1]);if(t!=='B')dirs.push([1,0],[-1,0],[0,1],[0,-1]);
+      for(const[a,d]of dirs){let rr=r+a,cc=c+d;while(tryAdd(rr,cc)){rr+=a;cc+=d}}}
+  }
+  return m;
+}
+function applyMove(s,[f,t]){
+  const b=s.b.split(''),p=b[f],w=isW(p),u=p.toUpperCase();
+  if(u==='P'&&t===s.ep&&b[t]==='.')b[(f&~7)+(t&7)]='.';
+  if(u==='K'&&Math.abs(t-f)===2){if(t>f){b[f+1]=b[f+3];b[f+3]='.'}else{b[f-1]=b[f-4];b[f-4]='.'}}
+  b[t]=(u==='P'&&(t<8||t>55))?(w?'Q':'q'):p;b[f]='.';
+  let ca=s.ca;
+  if(u==='K')ca=ca.replace(w?/[KQ]/g:/[kq]/g,'');
+  for(const[sq,ch]of[[63,'K'],[56,'Q'],[7,'k'],[0,'q']])if(f===sq||t===sq)ca=ca.replace(ch,'');
+  return{b:b.join(''),ca,ep:(u==='P'&&Math.abs(t-f)===16)?(f+t)/2:-1,last:[f,t]};
+}
+function legal(s,w){
+  const out=pseudo(s,w).filter(mv=>{const n=applyMove(s,mv);return!attacked(n.b,n.b.indexOf(w?'K':'k'),!w)});
+  const b=s.b,k=w?60:4,o=!w;
+  if(b[k]===(w?'K':'k')&&!attacked(b,k,o)){
+    if(s.ca.includes(w?'K':'k')&&b[k+1]==='.'&&b[k+2]==='.'&&b[k+3]===(w?'R':'r')&&!attacked(b,k+1,o)&&!attacked(b,k+2,o))out.push([k,k+2]);
+    if(s.ca.includes(w?'Q':'q')&&b[k-1]==='.'&&b[k-2]==='.'&&b[k-3]==='.'&&b[k-4]===(w?'R':'r')&&!attacked(b,k-1,o)&&!attacked(b,k-2,o))out.push([k,k-2]);
+  }
+  return out;
+}
+function lineWin(b,lines){for(const l of lines){const v=b[l[0]];if(v!=='.'&&l.every(i=>b[i]===v))return v}return null}
+const TTT=[[0,1,2],[3,4,5],[6,7,8],[0,3,6],[1,4,7],[2,5,8],[0,4,8],[2,4,6]];
+const C4=[];for(let r=0;r<6;r++)for(let c=0;c<7;c++)for(const[a,d]of[[0,1],[1,0],[1,1],[1,-1]]){const l=[];for(let k=0;k<4;k++){const rr=r+a*k,cc=c+d*k;if(rr<0||rr>5||cc<0||cc>6)break;l.push(rr*7+cc)}if(l.length===4)C4.push(l)}
+function dartScore(x,y){const d=Math.hypot(x-50,y-50)/46;return d<.07?50:d<.15?25:(d>.56&&d<.64)?30:d<.4?15:d<.7?10:d<1?5:0}
+function dartTotals(t){const s=[0,0];for(const[, ,v,p]of t)s[p-1]+=v;return s}
+const dartTurn=t=>Math.floor(t.length/3)%2+1;
+
+/* turn in → new game fields */
+function play(g,mv){
+  const s=g.s,p=g.turn;let ns,win=0,done=false;
+  if(g.kind==='chess'){ns=applyMove(s,mv);const w=p===2;
+    if(!legal(ns,w).length){done=true;win=attacked(ns.b,ns.b.indexOf(w?'K':'k'),!w)?p:'draw'}}
+  else if(g.kind==='ttt'){const b=s.b.split('');b[mv]=p===1?'X':'O';ns={b:b.join('')};const v=lineWin(ns.b,TTT);if(v){done=true;win=p}else if(!ns.b.includes('.')){done=true;win='draw'}}
+  else if(g.kind==='c4'){const b=s.b.split('');let r=5;while(r>=0&&b[r*7+mv]!=='.')r--;if(r<0)return null;b[r*7+mv]=p===1?'R':'Y';ns={b:b.join('')};if(lineWin(ns.b,C4)){done=true;win=p}else if(!ns.b.includes('.')){done=true;win='draw'}}
+  else{const t=s.t.concat([mv]);ns={t};if(t.length>=18){done=true;const[a,b]=dartTotals(t);win=a>b?1:b>a?2:'draw'}
+    return{s:ns,turn:done?p:dartTurn(t),status:done?'done':'playing',winner:win,upd:Date.now()}}
+  return{s:ns,turn:done?p:3-p,status:done?'done':'playing',winner:win,upd:Date.now()};
+}
+
+/* ---------- who am I in this game ---------- */
+const game=()=>local||net.g||null;
+function mySeat(g){if(!g)return 0;if(g.local)return g.turn;return net.host?g.hostSeat:3-g.hostSeat}
+const seatName=p=>p===mySeat(net.g)?'You':(net.them||'Friend');
+function canMove(g){return g&&g.status==='playing'&&mySeat(g)===g.turn&&!busy}
+
+/* ---------- drawing ---------- */
+const GL={K:'\u2654',Q:'\u2655',R:'\u2656',B:'\u2657',N:'\u2658',P:'\u2659'};
+function draw(){
+  const g=game(),k=g?g.kind:kind,sv=$('sv');let h='';
+  if(k==='chess'){
+    const s=g?g.s:init.chess(),flip=g&&!g.local&&mySeat(g)===2;
+    const tg=sel>=0&&g?legal(g.s,isW(g.s.b[sel])).filter(m=>m[0]===sel).map(m=>m[1]):[];
+    for(let v=0;v<64;v++){const i=flip?63-v:v,x=(v&7)*12.5,y=(v>>3)*12.5,dark=((i>>3)+(i&7))%2;
+      const last=s.last&&s.last.includes(i);
+      h+=`<rect x="${x}" y="${y}" width="12.6" height="12.6" fill="${i===sel?'#c6ff3d':last?'#ff4f8b':dark?'#3a1c2c':'#fff'}" fill-opacity="${i===sel||last?.75:dark?.55:.28}" data-i="${i}"/>`;
+      const p=s.b[i];
+      if(p!=='.')h+=`<text x="${x+6.25}" y="${y+10.3}" font-size="11" text-anchor="middle" fill="${isW(p)?'#fff':'#111'}" stroke="${isW(p)?'#111':'#fff'}" stroke-width=".45" paint-order="stroke" style="pointer-events:none;font-family:'Segoe UI Symbol','Noto Sans Symbols 2','DejaVu Sans',serif">${GL[p.toUpperCase()]}\uFE0E</text>`;
+      if(tg.includes(i))h+=`<circle cx="${x+6.25}" cy="${y+6.25}" r="2.2" fill="#c6ff3d" style="pointer-events:none"/>`;
+    }
+    h+=`<rect width="100" height="100" fill="none" stroke="#000" stroke-width=".8"/>`;
+  }else if(k==='ttt'){
+    const b=g?g.s.b:'.........';
+    h+=`<g stroke="#2a0d1e" stroke-width="2.4" stroke-linecap="round" opacity=".85"><line x1="33.3" y1="4" x2="33.3" y2="96"/><line x1="66.6" y1="4" x2="66.6" y2="96"/><line x1="4" y1="33.3" x2="96" y2="33.3"/><line x1="4" y1="66.6" x2="96" y2="66.6"/></g>`;
+    for(let i=0;i<9;i++){const x=(i%3)*33.3,y=Math.floor(i/3)*33.3,cx=x+16.6,cy=y+16.6;
+      h+=`<rect x="${x}" y="${y}" width="33.3" height="33.3" fill="transparent" data-i="${i}"/>`;
+      if(b[i]==='X')h+=`<g class="pop" style="transform-origin:${cx}px ${cy}px;pointer-events:none" stroke="#ff4f8b" stroke-width="4" stroke-linecap="round"><line x1="${cx-9}" y1="${cy-9}" x2="${cx+9}" y2="${cy+9}"/><line x1="${cx+9}" y1="${cy-9}" x2="${cx-9}" y2="${cy+9}"/></g>`;
+      if(b[i]==='O')h+=`<circle class="pop" style="transform-origin:${cx}px ${cy}px;pointer-events:none" cx="${cx}" cy="${cy}" r="10" fill="none" stroke="#2d6bff" stroke-width="4"/>`;
+    }
+  }else if(k==='c4'){
+    const b=g?g.s.b:'.'.repeat(42),cw=100/7,top=(100-6*cw)/2;
+    h+=`<rect x="0" y="${top}" width="100" height="${6*cw}" rx="3" fill="#1f4fd8" fill-opacity=".55"/>`;
+    for(let c=0;c<7;c++)h+=`<rect x="${c*cw}" y="0" width="${cw}" height="100" fill="transparent" data-i="${c}"/>`;
+    for(let i=0;i<42;i++){const r=Math.floor(i/7),c=i%7,v=b[i];
+      h+=`<circle cx="${c*cw+cw/2}" cy="${top+r*cw+cw/2}" r="${cw*.38}" fill="${v==='R'?'#ff3355':v==='Y'?'#ffd400':'#fff'}" fill-opacity="${v==='.'?.25:1}" stroke="#0006" stroke-width=".4" style="pointer-events:none"/>`}
+  }else{
+    const t=g?g.s.t:[];
+    const rings=[[46,'#111',.35],[45,'#fff',.25],[32,'#ff4f8b',.35],[29.4,'#fff',.2],[25.8,'#ff4f8b',.25],[18.4,'#fff',.25],[6.9,'#1aa34a',.75],[3.2,'#ff2244',.9]];
+    for(const[r,f,o]of rings)h+=`<circle cx="50" cy="50" r="${r}" fill="${f}" fill-opacity="${o}"/>`;
+    h+=`<rect x="-30" y="-30" width="160" height="160" fill="transparent" data-i="0"/>`;
+    t.forEach(([x,y,v,p],n)=>{h+=`<g style="pointer-events:none"><circle cx="${x}" cy="${y}" r="2" fill="${p===1?'#c6ff3d':'#2d6bff'}" stroke="#000" stroke-width=".6"/><text x="${x+2.6}" y="${y-2}" font-size="5" fill="#fff" stroke="#000" stroke-width=".8" paint-order="stroke" font-weight="800">${v}</text></g>`});
+    if(aim){const ax=aim.x,ay=aim.stage===2?aim.y:null;
+      h+=`<line x1="${ax}" y1="-20" x2="${ax}" y2="120" stroke="#c6ff3d" stroke-width="1" stroke-dasharray="2 1.5" style="pointer-events:none"/>`;
+      if(ay!==null)h+=`<line x1="-20" y1="${ay}" x2="120" y2="${ay}" stroke="#c6ff3d" stroke-width="1" stroke-dasharray="2 1.5" style="pointer-events:none"/><circle cx="${ax}" cy="${ay}" r="2.5" fill="none" stroke="#c6ff3d" stroke-width="1" style="pointer-events:none"/>`}
+  }
+  sv.innerHTML=h;
+  status();
+}
+function status(){
+  const g=game(),st=$('status'),vs=$('vs');
+  if(!g){st.textContent='Pick a game, then start one';vs.textContent='Start an online match for friends to join, or play two-player on this phone.';return}
+  const seat=mySeat(g);
+  const label=p=>g.local?(g.kind==='chess'?(p===1?'White':'Black'):g.kind==='c4'?(p===1?'Red':'Yellow'):g.kind==='ttt'?(p===1?'X':'O'):'Player '+p):seatName(p);
+  if(g.kind==='darts'){const[a,b]=dartTotals(g.s.t);vs.textContent=`${label(1)}: ${a}  ·  ${label(2)}: ${b}  ·  round ${Math.min(3,Math.floor(g.s.t.length/6)+1)} of 3`}
+  else vs.textContent=g.local?'Pass the phone back and forth':`You vs ${net.them||'Friend'}`+(net.state==='lost'?' · connection lost':'');
+  if(g.status==='waiting'){st.textContent='Waiting for someone to join…';return}
+  if(g.status==='done'){st.textContent=g.winner==='draw'?"It's a draw":(g.local?label(g.winner)+' wins!':(g.winner===seat?'You win!':label(g.winner)+' wins'));return}
+  let x='';
+  if(g.kind==='chess'&&attacked(g.s.b,g.s.b.indexOf(g.turn===1?'K':'k'),g.turn!==1))x=' (check!)';
+  if(g.kind==='darts'&&canMove(g))x=aim?(aim.stage===1?' · tap to lock left/right':' · tap to throw!'):' · tap the forehead to aim';
+  st.textContent=(g.local||seat===g.turn?(g.local?label(g.turn)+' to move':'Your turn'):`${label(g.turn)}'s turn`)+x;
+}
+
+/* ---------- input ---------- */
+$('sv').addEventListener('pointerdown',e=>{
+  const g=game();if(!canMove(g))return;
+  const el=e.target.closest('[data-i]');
+  if(g.kind==='darts'){
+    if(!aim){aim={stage:1,x:50,y:50,t0:performance.now()};spin();}
+    else if(aim.stage===1){aim.stage=2;aim.t0=performance.now()}
+    else{const x=Math.round(aim.x*10)/10,y=Math.round(aim.y*10)/10;aim=null;commit(g,[x,y,dartScore(x,y),g.turn])}
+    draw();return;
+  }
+  if(!el)return;const i=+el.dataset.i;
+  if(g.kind==='chess'){
+    const p=g.s.b[i],mine=p!=='.'&&isW(p)===(g.turn===1);
+    if(sel>=0){const mv=legal(g.s,g.turn===1).find(m=>m[0]===sel&&m[1]===i);if(mv){sel=-1;commit(g,mv);return}}
+    sel=mine?i:-1;draw();
+  }else if(g.kind==='ttt'){if(g.s.b[i]==='.')commit(g,i)}
+  else if(g.kind==='c4'){if(g.s.b[i]==='.')commit(g,i)}
+});
+function spin(){
+  if(!aim)return;const t=(performance.now()-aim.t0)/1000,sp=1.9+game().s.t.length*.07;
+  if(aim.stage===1)aim.x=50+50*Math.sin(t*sp*Math.PI);else aim.y=50+50*Math.sin(t*sp*1.15*Math.PI);
+  draw();requestAnimationFrame(spin);
+}
+async function commit(g,mv){
+  const u=play(g,mv);if(!u)return;
+  if(g.local){Object.assign(local,u);draw();return}
+  net.g={...g,...u};send({t:'state',g:net.g});draw();
+}
+
+
+/* ---------- online (peer to peer) ---------- */
+const CAP={chess:'Forehead chess',ttt:'Forehead tic-tac-toe',c4:'Forehead Connect 4',darts:'Forehead darts'};
+const fresh=(k,hostSeat)=>({kind:k,s:init[k](),turn:1,status:'playing',winner:0,hostSeat});
+function send(m){try{if(net.conn&&net.conn.open)net.conn.send(m)}catch(e){}}
+const linkFor=c=>location.href.split('#')[0]+'#'+c;
+function wire(c){
+  net.conn=c;
+  c.on('open',()=>{net.state='on';send({t:'hi',name:myName});if(net.host){net.g=fresh(kind,1);send({t:'state',g:net.g})}render()});
+  c.on('data',m=>{
+    if(!m||typeof m!=='object')return;
+    if(m.t==='hi'){net.them=String(m.name||'').slice(0,20)}
+    if(m.t==='state'&&m.g&&init[m.g.kind]){net.g=m.g;kind=m.g.kind;sel=-1;if(aim&&!canMove(net.g))aim=null}
+    render();
+  });
+  c.on('close',()=>{net.state='lost';render()});
+}
+function makePeer(id){
+  if(!window.Peer){net.state='err';$('net').textContent="Online play couldn't load. Check your connection and reload.";return null}
+  const p=id?new Peer(id):new Peer();
+  p.on('error',e=>{net.state='err';$('net').textContent=e&&e.type==='peer-unavailable'?'That game link has expired. Ask your friend for a new one.':'Connection problem. Reload and try again.';render()});
+  return p;
+}
+function host(){
+  net.host=true;net.code='fh'+Math.random().toString(36).slice(2,9);net.state='wait';local=null;
+  net.peer=makePeer(net.code);if(!net.peer)return;
+  net.peer.on('open',()=>render());
+  net.peer.on('connection',c=>{if(net.conn&&net.conn.open){c.close();return}wire(c)});
+  render();
+}
+function join(code){
+  net.host=false;net.code=code;net.state='joining';
+  net.peer=makePeer();if(!net.peer)return;
+  net.peer.on('open',()=>wire(net.peer.connect(code,{reliable:true})));
+  render();
+}
+function leave(){try{net.peer&&net.peer.destroy()}catch(e){}Object.assign(net,{peer:null,conn:null,host:false,code:'',g:null,them:'',state:'idle'});history.replaceState(null,'',location.pathname+location.search);render()}
+
+/* ---------- ui ---------- */
+function tabs(){
+  const k=game()?game().kind:kind;
+  $('tabs').innerHTML=Object.entries(KINDS).map(([x,v])=>`<button data-k="${x}" class="${x===k?'on':''}">${v}</button>`).join('');
+}
+$('tabs').addEventListener('click',e=>{const b=e.target.closest('button');if(!b)return;kind=b.dataset.k;sel=-1;aim=null;
+  if(net.state==='on'){net.g=fresh(kind,net.g?3-net.g.hostSeat:1);send({t:'state',g:net.g})}
+  else if(local)local=null;
+  render()});
+function actions(){
+  const g=game(),a=[];
+  if(local){a.push(['back','Back']);if(g.status==='done')a.push(['again','Rematch','go'])}
+  else if(net.state==='idle'||net.state==='err'){a.push(['host','Play a friend online','go']);a.push(['local','Play on this phone'])}
+  else{if(g&&g.status==='done'&&net.state==='on')a.push(['again','Rematch','go']);a.push(['leave','Leave game'])}
+  $('actions').innerHTML=a.map(([k,t,c])=>`<button data-a="${k}" class="${c||''}">${t}</button>`).join('');
+}
+$('actions').addEventListener('click',e=>{
+  const b=e.target.closest('button');if(!b)return;const a=b.dataset.a,g=game();
+  if(a==='back'){local=null;sel=-1;aim=null;render()}
+  if(a==='local'){local={local:true,...fresh(kind,1)};render()}
+  if(a==='host')host();
+  if(a==='leave')leave();
+  if(a==='again'){if(g.local){Object.assign(local,fresh(g.kind,1),{local:true})}else{net.g=fresh(g.kind,3-g.hostSeat);send({t:'state',g:net.g})}sel=-1;render()}
+});
+function lobby(){
+  const L=$('lobby');let h='';
+  if(net.state==='idle'||net.state==='err'){
+    h=`<p class="empty">Tap <b>Play a friend online</b>, send them the link, and the game starts the moment they open it. No account or app needed.</p>
+    <div class="field"><input id="nick" maxlength="20" placeholder="Your name (optional)" value="${esc(myName)}"></div>`;
+  }else if(net.state==='wait'){
+    const ready=net.peer&&net.peer.open;
+    h=`<p class="empty">${ready?'Send this link to a friend. Waiting for them to open it…':'Setting up your game…'}</p>`+
+      (ready?`<div class="link" id="lk"></div><div class="field"><button id="cp" class="go">Copy link</button><button id="sh">Share…</button></div>`:'');
+  }else if(net.state==='joining'){h='<p class="empty">Connecting to your friend…</p>'}
+  else if(net.state==='on'){h=`<p class="empty">Connected to ${esc(net.them||'your friend')}. Switch games with the buttons above; it changes for both of you.</p>`}
+  else if(net.state==='lost'){h='<p class="empty">Your friend disconnected. Leave and start a new game to play again.</p>'}
+  L.innerHTML=h;
+  const lk=$('lk');if(lk)lk.textContent=linkFor(net.code);
+}
+$('lobby').addEventListener('input',e=>{if(e.target.id==='nick'){myName=e.target.value.slice(0,20);try{localStorage.setItem('fa-name',myName)}catch(x){}}});
+$('lobby').addEventListener('click',async e=>{
+  const url=linkFor(net.code);
+  if(e.target.id==='cp'){try{await navigator.clipboard.writeText(url);e.target.textContent='Copied!'}catch(x){e.target.textContent='Copy it from above'}}
+  if(e.target.id==='sh'){try{await navigator.share({title:'Forehead Arcade',text:'Play me on the forehead',url})}catch(x){}}
+});
+function render(){$('cap').textContent=CAP[game()?game().kind:kind];tabs();actions();lobby();draw()}
+render();
+{const c=location.hash.slice(1);if(/^fh[a-z0-9]{4,12}$/.test(c))join(c)}
+}
+</script>
+</body>
+</html>
